@@ -1,104 +1,134 @@
 # BANIDO
 
-AI-powered code review agent that automatically reviews every Pull Request using GPT-4o or Claude.
+AI-powered code review agent. Lê seu `GUIDELINES.md`, analisa cada PR e grita **BANIDO** quando alguém codar merda.
 
-## How it works
+## Como funciona
 
 ```
-PR opened/updated
-      ↓
-GitHub Actions triggers
-      ↓
-Agent fetches the PR diff
-      ↓
-Sends diff to LLM (GPT-4o or Claude)
-      ↓
-LLM returns structured findings
-      ↓
-Agent posts inline comments on the PR
+PR aberto/atualizado
+        ↓
+GitHub Actions dispara
+        ↓
+Agent lê GUIDELINES.md do repo
+        ↓
+Roda heurísticas rápidas no diff (patterns de problemas conhecidos)
+        ↓
+Manda diff + guidelines pro LLM (Claude ou GPT-4o)
+        ↓
+LLM retorna findings estruturados em JSON
+        ↓
+Agent posta comentários inline no PR
+PRs com problema recebem REQUEST_CHANGES
+PRs limpos recebem APPROVE
 ```
 
-The agent reviews for:
+### O que aparece no PR
 
-- **Bugs** — logic errors, null dereferences, wrong conditions
-- **Security** — exposed secrets, injection vulnerabilities, unsafe defaults
-- **Performance** — N+1 queries, unnecessary allocations, hidden O(n²)
-- **Correctness** — race conditions, missing error handling, resource leaks
-- **Maintainability** — overly complex code, duplicated logic, magic numbers
+Cada problema sério recebe:
+
+```
+# BANIDO
+
+🐛 BUG
+
+`except:` sem tipo captura BaseException incluindo KeyboardInterrupt e SystemExit.
+Use `except Exception:` no mínimo, ou capture a exceção específica.
+```
+
+E um summary com score de qualidade:
+
+```
+# BANIDO Code Review
+
+Quality score: `████░░░░░░` 4/10
+
+3 BANIDO issue(s) — código inaceitável que precisa ser corrigido antes do merge.
+2 sugestão(ões) de melhoria.
+```
+
+### O que o agent detecta
+
+| Categoria | Exemplos |
+|-----------|---------|
+| 🔒 Security | Credenciais hardcoded, SQL injection, `eval()`, endpoints sem authz |
+| 🐛 Bug | Erros de lógica, null dereference, `except:` genérico, resource leaks |
+| ⚡ Performance | N+1 queries, loops com I/O, falta de paginação, O(n²) escondido |
+| 📋 Guideline | Qualquer violação das regras do seu `GUIDELINES.md` |
+| 💡 Suggestion | Melhorias reais de design que importam |
+| 🎨 Style | Só quando prejudica leitura ou viola linter configurado |
 
 ## Setup
 
-### 1. Add your LLM API key as a GitHub Secret
+### 1. Adicione sua API key como Secret do GitHub
 
-Go to **Settings → Secrets and variables → Actions** in your repository and add:
+**Settings → Secrets and variables → Actions → New repository secret**
 
-| Secret | Description |
-|--------|-------------|
-| `ANTHROPIC_API_KEY` | Anthropic API key (recommended — uses Claude) |
-| `OPENAI_API_KEY` | OpenAI API key (fallback — uses GPT-4o) |
+| Secret | Provedor |
+|--------|---------|
+| `ANTHROPIC_API_KEY` | Anthropic (recomendado — usa Claude) |
+| `OPENAI_API_KEY` | OpenAI (fallback — usa GPT-4o) |
 
-You need at least one of them. If both are set, Claude is preferred.
+Basta um dos dois. Se os dois existirem, Claude é usado.
 
-### 2. The workflow runs automatically
+### 2. Pronto
 
-The GitHub Actions workflow at `.github/workflows/code-review.yml` triggers on every new or updated PR. No additional configuration needed.
+O workflow `.github/workflows/code-review.yml` já está configurado e roda automaticamente em todo PR.
 
-### 3. (Optional) Customize behavior
+### 3. Customize o `GUIDELINES.md`
 
-Copy `review_agent/config.example.yml` to `.review-agent.yml` in the root and adjust limits, ignored paths, and severity filters.
+Edite o arquivo `GUIDELINES.md` na raiz do repo com as regras específicas do seu projeto.
+O agent vai lê-lo antes de cada review e tratar violações como **BANIDO**.
 
-```yaml
-max_comments_per_file: 5
-max_files: 20
-ignore_paths:
-  - "**/*.lock"
-  - "**/vendor/**"
+```markdown
+# GUIDELINES
+
+## Arquitetura
+- Controllers não acessam o banco diretamente — sempre via service/repository.
+- ...
+
+## Segurança
+- Toda query usa parâmetros preparados. Concatenação de string em SQL = BANIDO imediato.
+- ...
 ```
 
-## Repository structure
+## Estrutura
 
 ```
 .github/
   workflows/
     code-review.yml       # GitHub Actions workflow
 review_agent/
-  reviewer.py             # Core agent logic
-  requirements.txt        # Python dependencies (just httpx)
-  config.example.yml      # Configuration reference
+  reviewer.py             # Agent completo (~300 linhas)
+  requirements.txt        # Dependência: httpx
+  config.example.yml      # Referência de variáveis de configuração
+GUIDELINES.md             # Regras do projeto lidas pelo agent
 ```
 
-## Environment variables
+## Variáveis de ambiente
 
-All variables are set automatically by the workflow. For local testing:
+| Variável | Obrigatória | Default | Descrição |
+|----------|-------------|---------|-----------|
+| `GITHUB_TOKEN` | Sim | auto | Injetado pelo Actions |
+| `GITHUB_REPOSITORY` | Sim | auto | Injetado pelo Actions |
+| `PR_NUMBER` | Sim | auto | Injetado pelo Actions |
+| `OPENAI_API_KEY` | Um dos dois | — | OpenAI key |
+| `ANTHROPIC_API_KEY` | Um dos dois | — | Anthropic key |
+| `OPENAI_MODEL` | Não | `gpt-4o` | Modelo OpenAI |
+| `ANTHROPIC_MODEL` | Não | `claude-opus-4-5` | Modelo Claude |
+| `MAX_DIFF_CHARS` | Não | `80000` | Limite de chars do diff enviado ao LLM |
+| `MAX_COMMENTS_PER_FILE` | Não | `8` | Máx de comentários inline por arquivo |
+| `MAX_FILES` | Não | `30` | Máx de arquivos analisados por PR |
+| `GUIDELINES_PATH` | Não | `GUIDELINES.md` | Caminho do arquivo de guidelines |
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `GITHUB_TOKEN` | Yes | — | GitHub token (auto-injected by Actions) |
-| `GITHUB_REPOSITORY` | Yes | — | `owner/repo` (auto-injected by Actions) |
-| `PR_NUMBER` | Yes | — | PR number to review |
-| `OPENAI_API_KEY` | One of | — | OpenAI API key |
-| `ANTHROPIC_API_KEY` | One of | — | Anthropic API key |
-| `OPENAI_MODEL` | No | `gpt-4o` | OpenAI model to use |
-| `ANTHROPIC_MODEL` | No | `claude-opus-4-5` | Claude model to use |
-| `MAX_DIFF_CHARS` | No | `60000` | Max diff size sent to LLM |
-| `MAX_COMMENTS_PER_FILE` | No | `5` | Max inline comments per file |
-| `MAX_FILES` | No | `20` | Max files reviewed per PR |
-
-## Running locally
+## Rodando localmente
 
 ```bash
 pip install httpx
 
 export GITHUB_TOKEN="ghp_..."
-export ANTHROPIC_API_KEY="sk-ant-..."   # or OPENAI_API_KEY
+export ANTHROPIC_API_KEY="sk-ant-..."   # ou OPENAI_API_KEY
 export GITHUB_REPOSITORY="owner/repo"
 export PR_NUMBER=42
 
 python review_agent/reviewer.py
 ```
-
-## Limitations
-
-- Very large PRs (> 60k chars of diff) are truncated to keep within LLM context limits.
-- The agent does not have access to the full file context, only the changed lines.
-- Auto-generated files (lockfiles, protobuf, minified assets) should be excluded via `ignore_paths`.
