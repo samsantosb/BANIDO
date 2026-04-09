@@ -1,7 +1,13 @@
 # GUIDELINES
 
 Este arquivo é lido automaticamente pelo **BANIDO Code Review Agent** antes de cada review.
-Adicione aqui as regras específicas do seu projeto. Qualquer violação será marcada como **BANIDO**.
+Adicione aqui as regras específicas do seu projeto. Violações recebem veredicto de acordo com a gravidade:
+
+| Veredicto | Quando |
+|-----------|--------|
+| 🚫 **BANIDO** | Problema real que precisa ser corrigido antes do merge |
+| ☠️ **EXILADO** | Bug sério ou falha de segurança grave |
+| 💀 **OBLITERADO** | Catastrófico — destrói produção, expõe credenciais, abre RCE |
 
 ---
 

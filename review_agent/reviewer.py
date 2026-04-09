@@ -1,6 +1,11 @@
 """
 Code Review Agent — pistola
-Lê GUIDELINES.md como contexto, faz review cirúrgico e posta comentários BANIDO inline.
+Lê GUIDELINES.md como contexto, faz review cirúrgico.
+
+Veredictos por gravidade:
+  BANIDO     — problema real que precisa ser corrigido
+  EXILADO    — muito ruim, bug sério ou falha de segurança grave
+  OBLITERADO — terrível, catastrófico, inaceitável em qualquer codebase
 """
 
 import os
@@ -45,7 +50,28 @@ SEVERITY_EMOJI = {
     "style":       "🎨",
 }
 
-# Severities that warrant a BANIDO
+# Veredicto por gravidade (LLM retorna um campo "gravity": 1 | 2 | 3)
+# 1 = ruim       → BANIDO
+# 2 = muito ruim → EXILADO
+# 3 = terrível   → OBLITERADO
+VERDICT_BANIDO     = "BANIDO"
+VERDICT_EXILADO    = "EXILADO"
+VERDICT_OBLITERADO = "OBLITERADO"
+
+VERDICT_BY_GRAVITY = {1: VERDICT_BANIDO, 2: VERDICT_EXILADO, 3: VERDICT_OBLITERADO}
+
+VERDICT_HEADER = {
+    VERDICT_BANIDO:     "# BANIDO",
+    VERDICT_EXILADO:    "# EXILADO",
+    VERDICT_OBLITERADO: "# OBLITERADO",
+}
+
+VERDICT_EMOJI = {
+    VERDICT_BANIDO:     "🚫",
+    VERDICT_EXILADO:    "☠️",
+    VERDICT_OBLITERADO: "💀",
+}
+
 BANIDO_SEVERITIES = {"bug", "security", "performance", "guideline"}
 
 
@@ -60,6 +86,7 @@ class ReviewComment:
     body: str
     severity: str = "suggestion"
     banido: bool = False
+    verdict: str = VERDICT_BANIDO  # BANIDO | EXILADO | OBLITERADO
 
 
 @dataclass
@@ -184,45 +211,76 @@ def _build_line_map(patch: str) -> dict[int, int]:
 
 
 def post_review(comments: list[ReviewComment], commit_id: str, pr_meta: dict) -> None:
-    banido_count = sum(1 for c in comments if c.banido)
-    clean_count = len(comments) - banido_count
-
     if not comments:
         _post_approval(commit_id)
         return
 
-    score = max(0, 10 - banido_count * 2 - clean_count)
+    obliterado = [c for c in comments if c.verdict == VERDICT_OBLITERADO]
+    exilado    = [c for c in comments if c.verdict == VERDICT_EXILADO]
+    banido     = [c for c in comments if c.verdict == VERDICT_BANIDO and c.banido]
+    suggestions = [c for c in comments if not c.banido]
+
+    serious_count = len(obliterado) + len(exilado) + len(banido)
+
+    # Score: OBLITERADO pesa 5, EXILADO pesa 3, BANIDO pesa 2, suggestion pesa 0.5
+    penalty = len(obliterado) * 5 + len(exilado) * 3 + len(banido) * 2 + len(suggestions) * 0.5
+    score = max(0, round(10 - penalty))
     score_bar = "█" * score + "░" * (10 - score)
 
+    # Choose overall verdict label for the title
+    if obliterado:
+        title_verdict = "💀 OBLITERADO"
+    elif exilado:
+        title_verdict = "☠️  EXILADO"
+    elif banido:
+        title_verdict = "🚫 BANIDO"
+    else:
+        title_verdict = "💡 Sugestões"
+
     body_lines = [
-        "# BANIDO Code Review",
+        f"# {title_verdict} — Code Review",
         "",
         f"**Quality score:** `{score_bar}` {score}/10",
         "",
     ]
 
-    if banido_count:
+    if obliterado:
         body_lines += [
-            f"**{banido_count} BANIDO** issue(s) encontrada(s) — código inaceitável que precisa ser corrigido antes do merge.",
+            f"**💀 {len(obliterado)} OBLITERADO** — código catastrófico, inaceitável. Reescreva antes de qualquer merge.",
             "",
         ]
-
-    if clean_count:
+    if exilado:
         body_lines += [
-            f"**{clean_count}** sugestão(ões) de melhoria.",
+            f"**☠️  {len(exilado)} EXILADO** — muito ruim. Bug sério ou falha de segurança grave.",
+            "",
+        ]
+    if banido:
+        body_lines += [
+            f"**🚫 {len(banido)} BANIDO** — problema real que precisa ser corrigido.",
+            "",
+        ]
+    if suggestions:
+        body_lines += [
+            f"**{len(suggestions)}** sugestão(ões) de melhoria.",
             "",
         ]
 
     body_lines += [
-        "| | Severidade | Arquivo | Linha | Resumo |",
-        "|--|----------|------|------|-------|",
+        "| Veredicto | Severidade | Arquivo | Linha | Resumo |",
+        "|-----------|----------|------|------|-------|",
     ]
 
     for c in comments:
-        emoji = SEVERITY_EMOJI.get(c.severity, "💬")
-        prefix = "🚫" if c.banido else "  "
-        short = c.body.split("\n")[0].replace("BANIDO", "").strip()[:90]
-        body_lines.append(f"| {prefix} | {emoji} {c.severity} | `{c.path}` | {c.line} | {short} |")
+        sev_emoji = SEVERITY_EMOJI.get(c.severity, "💬")
+        v_emoji = VERDICT_EMOJI.get(c.verdict, "💬") if c.banido else "  "
+        verdict_label = c.verdict if c.banido else "—"
+        short = c.body.split("\n")[0][:90]
+        # Strip verdict word from start of summary to avoid redundancy
+        for w in (VERDICT_OBLITERADO, VERDICT_EXILADO, VERDICT_BANIDO):
+            short = short.replace(w, "").strip()
+        body_lines.append(
+            f"| {v_emoji} {verdict_label} | {sev_emoji} {c.severity} | `{c.path}` | {c.line} | {short} |"
+        )
 
     review_body = "\n".join(body_lines)
 
@@ -239,7 +297,7 @@ def post_review(comments: list[ReviewComment], commit_id: str, pr_meta: dict) ->
     payload = {
         "commit_id": commit_id,
         "body": review_body,
-        "event": "REQUEST_CHANGES" if banido_count > 0 else "COMMENT",
+        "event": "REQUEST_CHANGES" if serious_count > 0 else "COMMENT",
         "comments": gh_comments,
     }
 
@@ -251,7 +309,7 @@ def post_review(comments: list[ReviewComment], commit_id: str, pr_meta: dict) ->
         _post_fallback_comment(review_body)
         return
 
-    action = "REQUEST_CHANGES" if banido_count > 0 else "COMMENT"
+    action = "REQUEST_CHANGES" if serious_count > 0 else "COMMENT"
     print(f"Posted review ({action}) with {len(gh_comments)} inline comment(s).")
 
 
@@ -276,7 +334,8 @@ def _post_approval(commit_id: str) -> None:
 def _format_comment(c: ReviewComment) -> str:
     emoji = SEVERITY_EMOJI.get(c.severity, "💬")
     if c.banido:
-        header = f"# BANIDO\n\n{emoji} **{c.severity.upper()}**"
+        v_header = VERDICT_HEADER[c.verdict]
+        header = f"{v_header}\n\n{emoji} **{c.severity.upper()}**"
     else:
         header = f"{emoji} **{c.severity.upper()}**"
     return f"{header}\n\n{c.body}"
@@ -293,37 +352,53 @@ def _post_fallback_comment(body: str) -> None:
 # Heuristic pre-scan (fast, before calling LLM)
 # ---------------------------------------------------------------------------
 
+# (pattern, severity, gravity, message)
+# gravity 1=BANIDO  2=EXILADO  3=OBLITERADO
 HEURISTIC_PATTERNS = [
-    # Secrets & credentials
-    (re.compile(r'(?i)(password|passwd|secret|api_?key|token|private_?key)\s*=\s*["\'][^"\']{4,}["\']'), "security",
-     "Possível credencial hardcoded detectada. Mova para variável de ambiente ou secret manager."),
-    # SQL concatenation
-    (re.compile(r'(?i)(execute|query|cursor\.execute)\s*\(\s*[f"\'"].*\+'), "security",
-     "Concatenação de string em query SQL — risco de SQL injection. Use parâmetros preparados."),
-    # print/console.log em produção
-    (re.compile(r'^\+\s*(print\(|console\.log\(|System\.out\.print)', re.MULTILINE), "style",
-     "Debug print/log detectado. Remova ou substitua por logging estruturado."),
-    # TODO/FIXME em código novo
-    (re.compile(r'^\+.*(TODO|FIXME|HACK|XXX)', re.MULTILINE), "suggestion",
+    # OBLITERADO — credencial hardcoded é catastrófico
+    (re.compile(r'(?i)(password|passwd|secret|api_?key|token|private_?key)\s*=\s*["\'][^"\']{4,}["\']'), "security", 3,
+     "Credencial hardcoded no código-fonte. Qualquer pessoa com acesso ao repo tem essa chave. "
+     "Revogue imediatamente e mova para variável de ambiente ou secret manager."),
+
+    # OBLITERADO — eval com input externo
+    (re.compile(r'^\+.*\beval\s*\(.*(?:request|input|params|query|body|user)', re.MULTILINE), "security", 3,
+     "`eval()` executando input controlado pelo usuário. Remote Code Execution (RCE) direto. "
+     "Remova imediatamente."),
+
+    # EXILADO — SQL por concatenação
+    (re.compile(r'(?i)(execute|query|cursor\.execute)\s*\(\s*[f"\'"].*\+'), "security", 2,
+     "Concatenação de string em query SQL — SQL injection clássico. "
+     "Use parâmetros preparados: `cursor.execute(query, (param,))`"),
+
+    # EXILADO — eval sem input visível mas ainda perigoso
+    (re.compile(r'^\+.*\beval\s*\('), "security", 2,
+     "`eval()` executa código arbitrário. Extremamente perigoso com qualquer dado externo. "
+     "Substitua por uma abordagem segura."),
+
+    # BANIDO — except genérico
+    (re.compile(r'^\+\s*except\s*:', re.MULTILINE), "bug", 1,
+     "`except:` sem tipo captura `BaseException`, incluindo `KeyboardInterrupt` e `SystemExit`. "
+     "Use `except Exception:` no mínimo, ou capture a exceção específica."),
+
+    # BANIDO — debug print em produção
+    (re.compile(r'^\+\s*(print\(|console\.log\(|System\.out\.print)', re.MULTILINE), "style", 1,
+     "Debug statement detectado. Remova ou substitua por logging estruturado."),
+
+    # BANIDO — TODO/FIXME em código novo
+    (re.compile(r'^\+.*(TODO|FIXME|HACK|XXX)', re.MULTILINE), "suggestion", 1,
      "TODO/FIXME em código adicionado. Resolva antes do merge ou abra uma issue rastreável."),
-    # Except genérico
-    (re.compile(r'^\+\s*except\s*:', re.MULTILINE), "bug",
-     "`except:` sem tipo captura BaseException incluindo KeyboardInterrupt e SystemExit. Use `except Exception:` no mínimo, ou capture a exceção específica."),
-    # eval()
-    (re.compile(r'^\+.*\beval\s*\('), "security",
-     "`eval()` executa código arbitrário. Altamente perigoso com input externo."),
-    # Comparação com True/False explícita
-    (re.compile(r'^\+.*(==\s*True|==\s*False|is\s+True|is\s+False)', re.MULTILINE), "style",
-     "Comparação explícita com booleano. Use o valor diretamente: `if x:` em vez de `if x == True:`."),
+
+    # BANIDO — comparação explícita com booleano
+    (re.compile(r'^\+.*(==\s*True|==\s*False)', re.MULTILINE), "style", 1,
+     "Comparação explícita com booleano. Use `if x:` em vez de `if x == True:`."),
 ]
 
 
 def run_heuristics(files: list[DiffFile]) -> list[ReviewComment]:
     found: list[ReviewComment] = []
     for df in files:
-        for pattern, severity, message in HEURISTIC_PATTERNS:
+        for pattern, severity, gravity, message in HEURISTIC_PATTERNS:
             for m in pattern.finditer(df.patch):
-                # Find the line number of the match
                 patch_before = df.patch[: m.start()]
                 patch_line_idx = patch_before.count("\n") + 1
                 line = df.line_map.get(patch_line_idx)
@@ -333,6 +408,7 @@ def run_heuristics(files: list[DiffFile]) -> list[ReviewComment]:
                         continue
                     line = valid[0]
                 banido = severity in BANIDO_SEVERITIES
+                verdict = VERDICT_BY_GRAVITY.get(gravity, VERDICT_BANIDO)
                 found.append(
                     ReviewComment(
                         path=df.path,
@@ -340,6 +416,7 @@ def run_heuristics(files: list[DiffFile]) -> list[ReviewComment]:
                         body=message,
                         severity=severity,
                         banido=banido,
+                        verdict=verdict,
                     )
                 )
     return found
@@ -387,10 +464,30 @@ def build_system_prompt(guidelines: str) -> str:
         - DO flag: real bugs, security holes, perf cliffs, guideline violations, subtle correctness issues
         - DO NOT flag: personal style preferences, renaming for its own sake, missing comments on obvious code
         - Every finding must include: what is wrong, WHY it matters, and a concrete fix or code example
-        - For `bug` and `security` and `performance` and `guideline` findings: set `"banido": true`
-        - For `suggestion` and `style` findings: set `"banido": false`
+        - For `bug`, `security`, `performance`, `guideline`: set `"banido": true`
+        - For `suggestion`, `style`: set `"banido": false`
         - Line numbers must refer to the NEW file (right side of diff, lines starting with `+`)
         - Be precise: point to the exact line, not a nearby one
+
+        ## GRAVITY SCALE
+
+        Every `banido: true` finding must have a `gravity` field (1, 2, or 3):
+
+        - **1 = BANIDO** — real problem, needs fixing before merge
+          Examples: missing error handling, magic number causing silent bugs, resource not closed,
+          guideline violation, minor logic error
+
+        - **2 = EXILADO** — serious bug or significant security flaw
+          Examples: SQL injection, auth bypass, race condition that corrupts data,
+          off-by-one that causes crashes, unhandled exception that takes down the service,
+          exposed sensitive data in logs/responses
+
+        - **3 = OBLITERADO** — catastrophic, production-destroying, or unforgivable
+          Examples: hardcoded credentials committed to repo, RCE vector (eval with user input),
+          deleting production data without confirmation, complete auth bypass on critical endpoint,
+          infinite loop with no escape in request handler, dropping entire database tables
+
+        `banido: false` findings (suggestion/style) must omit `gravity` or set it to null.
 
         ## OUTPUT FORMAT
 
@@ -400,7 +497,8 @@ def build_system_prompt(guidelines: str) -> str:
           "line": <integer — exact new-file line number>,
           "severity": "<security | bug | performance | guideline | suggestion | style>",
           "banido": <true | false>,
-          "body": "<markdown — what is wrong, why it matters, how to fix it with code example if applicable>"
+          "gravity": <1 | 2 | 3 | null>,
+          "body": "<markdown — what is wrong, why it matters, how to fix it with a code example>"
         }}
 
         No markdown fences. No prose outside the array. If nothing is wrong, return: []
@@ -514,6 +612,8 @@ def resolve_llm_comments(raw: list[dict], files: list[DiffFile]) -> list[ReviewC
         severity = item.get("severity", "suggestion")
         body = (item.get("body") or "").strip()
         banido = bool(item.get("banido", False)) or severity in BANIDO_SEVERITIES
+        gravity = item.get("gravity") or (1 if banido else None)
+        verdict = VERDICT_BY_GRAVITY.get(gravity, VERDICT_BANIDO) if banido else VERDICT_BANIDO
 
         if not path or not line or not body:
             continue
@@ -533,7 +633,9 @@ def resolve_llm_comments(raw: list[dict], files: list[DiffFile]) -> list[ReviewC
         if per_file[path] > MAX_COMMENTS_PER_FILE:
             continue
 
-        comments.append(ReviewComment(path=path, line=line, body=body, severity=severity, banido=banido))
+        comments.append(
+            ReviewComment(path=path, line=line, body=body, severity=severity, banido=banido, verdict=verdict)
+        )
 
     return comments
 
@@ -553,8 +655,12 @@ def deduplicate(
         seen.add(key)
         result.append(c)
 
-    # Sort: banido first, then by file
-    result.sort(key=lambda c: (not c.banido, c.path, c.line))
+    verdict_order = {VERDICT_OBLITERADO: 0, VERDICT_EXILADO: 1, VERDICT_BANIDO: 2}
+    result.sort(key=lambda c: (
+        verdict_order.get(c.verdict, 3) if c.banido else 4,
+        c.path,
+        c.line,
+    ))
     return result
 
 
@@ -598,8 +704,15 @@ def run() -> None:
     llm_comments = resolve_llm_comments(raw_findings, files)
     all_comments = deduplicate(heuristic_comments, llm_comments)
 
-    banido_count = sum(1 for c in all_comments if c.banido)
-    print(f"Final: {len(all_comments)} comment(s), {banido_count} BANIDO.")
+    obliterado_count = sum(1 for c in all_comments if c.verdict == VERDICT_OBLITERADO)
+    exilado_count    = sum(1 for c in all_comments if c.verdict == VERDICT_EXILADO)
+    banido_count     = sum(1 for c in all_comments if c.verdict == VERDICT_BANIDO and c.banido)
+    suggestion_count = sum(1 for c in all_comments if not c.banido)
+    print(
+        f"Final: {len(all_comments)} total | "
+        f"💀 OBLITERADO={obliterado_count} ☠️  EXILADO={exilado_count} "
+        f"🚫 BANIDO={banido_count} 💡 suggestions={suggestion_count}"
+    )
 
     post_review(all_comments, commit_id, pr_meta)
 
