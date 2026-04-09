@@ -1,0 +1,55 @@
+name: BANIDO Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Garante que só roda 1 review por PR de cada vez
+concurrency:
+  group: banido-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: BANIDO Code Review
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    # Não rodar em PRs de bots
+    if: github.actor != 'dependabot[bot]' && github.actor != 'github-actions[bot]'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r review_agent/requirements.txt
+
+      - name: Run BANIDO Agent
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Configure pelo menos um dos dois:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Modelos (opcionais — tem defaults)
+          # OPENAI_MODEL: "gpt-4o"
+          # ANTHROPIC_MODEL: "claude-opus-4-5"
+          # Limites (opcionais)
+          # MAX_DIFF_CHARS: "80000"
+          # MAX_COMMENTS_PER_FILE: "8"
+          # MAX_FILES: "30"
+          # Caminho do guidelines (padrão: GUIDELINES.md)
+          # GUIDELINES_PATH: "GUIDELINES.md"
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python review_agent/reviewer.py
