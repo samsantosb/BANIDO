@@ -1,0 +1,59 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    # Rodar só em PRs que alterem código de verdade (ignora docs/configs)
+    paths-ignore:
+      - "**.md"
+      - ".gitignore"
+      - "LICENSE"
+
+# Garante que só roda 1 review por PR de cada vez
+concurrency:
+  group: code-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: AI Code Review
+    runs-on: ubuntu-latest
+
+    # Permissões necessárias para postar comentários no PR
+    permissions:
+      contents: read
+      pull-requests: write
+
+    # Não rodar em PRs de bots (Dependabot, etc.)
+    if: github.actor != 'dependabot[bot]' && github.actor != 'github-actions[bot]'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Fetch suficiente para ter contexto de diff
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r review_agent/requirements.txt
+
+      - name: Run Code Review Agent
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Configure pelo menos um dos dois:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Variáveis de controle (opcional — tem defaults)
+          # OPENAI_MODEL: "gpt-4o"
+          # ANTHROPIC_MODEL: "claude-opus-4-5"
+          # MAX_DIFF_CHARS: "60000"
+          # MAX_COMMENTS_PER_FILE: "5"
+          # MAX_FILES: "20"
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python review_agent/reviewer.py

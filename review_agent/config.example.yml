@@ -1,0 +1,39 @@
+# Configuração do Code Review Agent
+# Copie este arquivo para .review-agent.yml na raiz do repo para customizar
+
+# Provedor de LLM: "openai" ou "anthropic"
+# Se deixar em branco, o agent detecta automaticamente pela variável de ambiente disponível
+llm_provider: auto
+
+# Modelo a usar
+openai_model: gpt-4o
+anthropic_model: claude-opus-4-5
+
+# Limites
+max_diff_chars: 60000       # Máximo de caracteres do diff enviado ao LLM
+max_comments_per_file: 5    # Máximo de comentários inline por arquivo
+max_files: 20               # Máximo de arquivos analisados por PR
+
+# Severidades a incluir nos comentários (remova as que não quer)
+severities:
+  - bug
+  - security
+  - performance
+  - suggestion
+  - style
+
+# Arquivos/padrões a ignorar
+ignore_paths:
+  - "**/*.lock"
+  - "**/vendor/**"
+  - "**/node_modules/**"
+  - "**/__pycache__/**"
+  - "**/*.min.js"
+  - "**/*.min.css"
+  - "**/*.pb.go"          # protobuf gerado
+  - "**/*_generated*.go"  # código gerado
+
+# Foco do review (deixe vazio para revisar tudo)
+# focus:
+#   - security
+#   - bugs
