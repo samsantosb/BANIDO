@@ -355,42 +355,141 @@ def _post_fallback_comment(body: str) -> None:
 # (pattern, severity, gravity, message)
 # gravity 1=BANIDO  2=EXILADO  3=OBLITERADO
 HEURISTIC_PATTERNS = [
-    # OBLITERADO — credencial hardcoded é catastrófico
-    (re.compile(r'(?i)(password|passwd|secret|api_?key|token|private_?key)\s*=\s*["\'][^"\']{4,}["\']'), "security", 3,
-     "Credencial hardcoded no código-fonte. Qualquer pessoa com acesso ao repo tem essa chave. "
-     "Revogue imediatamente e mova para variável de ambiente ou secret manager."),
 
-    # OBLITERADO — eval com input externo
-    (re.compile(r'^\+.*\beval\s*\(.*(?:request|input|params|query|body|user)', re.MULTILINE), "security", 3,
-     "`eval()` executando input controlado pelo usuário. Remote Code Execution (RCE) direto. "
-     "Remova imediatamente."),
+    # ── OBLITERADO ────────────────────────────────────────────────────────────
 
-    # EXILADO — SQL por concatenação
-    (re.compile(r'(?i)(execute|query|cursor\.execute)\s*\(\s*[f"\'"].*\+'), "security", 2,
-     "Concatenação de string em query SQL — SQL injection clássico. "
-     "Use parâmetros preparados: `cursor.execute(query, (param,))`"),
+    # Credencial hardcoded — o clássico career-ender
+    (re.compile(r'(?i)(password|passwd|secret|api_?key|token|private_?key|auth_?key|access_?key)\s*=\s*["\'][^"\']{6,}["\']'),
+     "security", 3,
+     "**What:** Credencial hardcoded no código-fonte.\n"
+     "**Why it matters:** Qualquer pessoa com acesso ao repositório — atual ou futuro, colaborador ou atacante — tem essa chave. Tokens em histórico git são permanentes mesmo após remoção.\n"
+     "**Fix:** Revogue a chave imediatamente. Use variáveis de ambiente ou um secret manager:\n"
+     "```python\nimport os\nAPI_KEY = os.environ['API_KEY']  # nunca o valor direto\n```"),
 
-    # EXILADO — eval sem input visível mas ainda perigoso
+    # eval() com input controlado pelo usuário → RCE direto
+    (re.compile(r'^\+.*\beval\s*\(.*(?:request|input|params|query|body|user|data|payload)', re.MULTILINE),
+     "security", 3,
+     "**What:** `eval()` executando input controlado pelo usuário.\n"
+     "**Why it matters:** Remote Code Execution direta. Um atacante pode rodar qualquer código no servidor.\n"
+     "**Fix:** Remova `eval()`. Se precisar parsear expressões, use um parser seguro como `ast.literal_eval` para literais Python, ou uma biblioteca dedicada."),
+
+    # exec() com input externo
+    (re.compile(r'^\+.*\bexec\s*\(.*(?:request|input|params|query|body|user|data|payload)', re.MULTILINE),
+     "security", 3,
+     "**What:** `exec()` executando input controlado pelo usuário.\n"
+     "**Why it matters:** Remote Code Execution direta. Equivalente a dar acesso root ao atacante.\n"
+     "**Fix:** Remova. Sem exceção."),
+
+    # shell=True com variável (command injection)
+    (re.compile(r'(?:subprocess\.(run|call|Popen|check_output)|os\.system)\s*\([^)]*shell\s*=\s*True[^)]*[+%f]', re.MULTILINE),
+     "security", 3,
+     "**What:** `shell=True` com string construída dinamicamente — command injection.\n"
+     "**Why it matters:** Um atacante pode injetar comandos arbitrários no sistema operacional via `; rm -rf /` ou similar.\n"
+     "**Fix:** Passe uma lista de argumentos e remova `shell=True`:\n"
+     "```python\nsubprocess.run(['comando', arg1, arg2], shell=False)\n```"),
+
+    # ── EXILADO ───────────────────────────────────────────────────────────────
+
+    # SQL por concatenação de string
+    (re.compile(r'(?i)(\.execute|\.query|cursor\.execute)\s*\(\s*(?:f["\']|["\'].*\+|\w+\s*\+)'),
+     "security", 2,
+     "**What:** Query SQL construída por concatenação de string.\n"
+     "**Why it matters:** SQL injection clássico. Um input `' OR '1'='1` destrói o WHERE. `'; DROP TABLE users; --` é literal.\n"
+     "**Fix:** Use parâmetros preparados:\n"
+     "```python\ncursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))\n```"),
+
+    # eval() sem input visível mas ainda perigoso
     (re.compile(r'^\+.*\beval\s*\('), "security", 2,
-     "`eval()` executa código arbitrário. Extremamente perigoso com qualquer dado externo. "
-     "Substitua por uma abordagem segura."),
+     "**What:** `eval()` presente no código.\n"
+     "**Why it matters:** Mesmo sem input externo visível agora, qualquer refactor futuro que passe uma variável cria RCE instantaneamente. É uma bomba-relógio.\n"
+     "**Fix:** Substitua por uma alternativa segura. `ast.literal_eval` para dados, `importlib` para módulos."),
 
-    # BANIDO — except genérico
-    (re.compile(r'^\+\s*except\s*:', re.MULTILINE), "bug", 1,
-     "`except:` sem tipo captura `BaseException`, incluindo `KeyboardInterrupt` e `SystemExit`. "
-     "Use `except Exception:` no mínimo, ou capture a exceção específica."),
+    # Deserialização insegura (pickle com dados externos)
+    (re.compile(r'(?i)pickle\.loads?\s*\(.*(?:request|body|data|payload|input|user)', re.MULTILINE),
+     "security", 2,
+     "**What:** `pickle.load/loads` executando dados externos.\n"
+     "**Why it matters:** Pickle executa código Python arbitrário durante desserialização. RCE com um payload específico.\n"
+     "**Fix:** Use JSON, MessagePack, ou Protocol Buffers para dados externos. Nunca pickle."),
 
-    # BANIDO — debug print em produção
-    (re.compile(r'^\+\s*(print\(|console\.log\(|System\.out\.print)', re.MULTILINE), "style", 1,
-     "Debug statement detectado. Remova ou substitua por logging estruturado."),
+    # Redirect para URL arbitrária (open redirect)
+    (re.compile(r'(?i)(redirect|location)\s*[\(=]\s*.*(?:request|params|query|input|user)', re.MULTILINE),
+     "security", 2,
+     "**What:** Redirecionamento para URL controlada pelo usuário — open redirect.\n"
+     "**Why it matters:** Usado em phishing: `https://seusite.com/redirect?to=https://evil.com`. Valida origem do token OAuth.\n"
+     "**Fix:** Valide que a URL de destino pertence ao domínio permitido antes de redirecionar."),
 
-    # BANIDO — TODO/FIXME em código novo
-    (re.compile(r'^\+.*(TODO|FIXME|HACK|XXX)', re.MULTILINE), "suggestion", 1,
-     "TODO/FIXME em código adicionado. Resolva antes do merge ou abra uma issue rastreável."),
+    # Race condition clássica (TOCTOU)
+    (re.compile(r'(?i)(os\.path\.exists|os\.access|os\.stat)\s*\([^)]+\)(?:.|\n){0,200}(?:open|write|delete|remove|rename)', re.MULTILINE),
+     "bug", 2,
+     "**What:** Padrão check-then-act (TOCTOU) em operação de arquivo.\n"
+     "**Why it matters:** Entre o `os.path.exists()` e a operação, outro processo pode modificar o arquivo. Race condition clássica — especialmente perigosa com symlinks.\n"
+     "**Fix:** Use operações atômicas: `open()` com flag `x` (exclusive create), ou trate a exceção diretamente:"),
 
-    # BANIDO — comparação explícita com booleano
-    (re.compile(r'^\+.*(==\s*True|==\s*False)', re.MULTILINE), "style", 1,
-     "Comparação explícita com booleano. Use `if x:` em vez de `if x == True:`."),
+    # Senha em log
+    (re.compile(r'(?i)(log|logger|logging|print)\s*\(.*(?:password|passwd|secret|token|key|credential|auth)', re.MULTILINE),
+     "security", 2,
+     "**What:** Possível credencial sendo logada.\n"
+     "**Why it matters:** Logs são frequentemente indexados, exportados para Datadog/Splunk/ELK, e acessíveis por muito mais pessoas que o banco de dados. PII em logs é um compliance nightmare (GDPR, LGPD).\n"
+     "**Fix:** Remova o campo sensível do log, ou use uma classe wrapper que redact automaticamente."),
+
+    # ── BANIDO ────────────────────────────────────────────────────────────────
+
+    # except: pelado (Carmack: nunca engula exceções)
+    (re.compile(r'^\+\s*except\s*:', re.MULTILINE),
+     "bug", 1,
+     "**What:** `except:` sem tipo captura `BaseException`, incluindo `KeyboardInterrupt`, `SystemExit`, e `GeneratorExit`.\n"
+     "**Why it matters:** Impede o processo de ser encerrado normalmente. Engole erros de programação que deveriam explodir. Torna debugging impossível.\n"
+     "**Fix:** Especifique a exceção: `except ValueError:`, ou use `except Exception:` como mínimo absoluto."),
+
+    # except Exception sem re-raise nem log (Carmack: silent failures)
+    (re.compile(r'^\+\s*except\s+Exception\s*(?:as\s+\w+)?\s*:\s*\n(?:\+[^\n]*\n)*\+\s*pass', re.MULTILINE),
+     "bug", 1,
+     "**What:** Exceção capturada e silenciosamente ignorada com `pass`.\n"
+     "**Why it matters:** Falhas silenciosas são o pior tipo de bug. O código continua executando em estado inválido, corrompendo dados silenciosamente.\n"
+     "**Fix:** Logue o erro no mínimo: `logger.exception('msg')` ou re-raise."),
+
+    # Comparação de float com == (Carmack: imprecisão de ponto flutuante)
+    (re.compile(r'^\+.*(?:float|[0-9]+\.[0-9]+)\s*==\s*(?:float|[0-9]+\.[0-9]+)', re.MULTILINE),
+     "bug", 1,
+     "**What:** Comparação de ponto flutuante com `==`.\n"
+     "**Why it matters:** `0.1 + 0.2 == 0.3` é `False` em Python (e em toda linguagem com IEEE 754). Essa comparação vai falhar em condições específicas de forma não reproduzível.\n"
+     "**Fix:** Use `math.isclose(a, b, rel_tol=1e-9)` ou compare com tolerância: `abs(a - b) < epsilon`."),
+
+    # Mutable default argument (bug clássico Python)
+    (re.compile(r'def\s+\w+\s*\([^)]*=\s*(?:\[\]|\{\}|list\(\)|dict\(\)|set\(\))', re.MULTILINE),
+     "bug", 1,
+     "**What:** Argumento padrão mutável (`[]` ou `{}`) em definição de função.\n"
+     "**Why it matters:** Default arguments em Python são criados UMA vez quando a função é definida, não em cada chamada. A mesma lista/dict é compartilhada entre todas as chamadas — estado vaza entre invocações.\n"
+     "**Fix:**\n"
+     "```python\ndef f(items=None):  # correto\n    if items is None:\n        items = []\n```"),
+
+    # Debug prints (Linus: não polua o output)
+    (re.compile(r'^\+\s*(print\s*\(|console\.log\s*\(|System\.out\.print|fmt\.Print(?:ln|f)?\s*\(|var_dump\s*\(|dd\s*\()', re.MULTILINE),
+     "style", 1,
+     "**What:** Debug statement detectado.\n"
+     "**Why it matters:** Debug prints em produção poluem logs, expõem dados internos, e degradam performance em hot paths.\n"
+     "**Fix:** Remova ou substitua por `logger.debug()` com nível configurável."),
+
+    # TODO/FIXME/HACK
+    (re.compile(r'^\+.*(TODO|FIXME|HACK|XXX)\b', re.MULTILINE),
+     "suggestion", 1,
+     "**What:** TODO/FIXME em código sendo mergeado.\n"
+     "**Why it matters:** TODO sem issue vinculada nunca é resolvido. Vira dívida técnica permanente.\n"
+     "**Fix:** Resolva agora, ou abra uma issue e substitua por `# TODO: #<número-da-issue> descrição`."),
+
+    # Magic numbers sem contexto
+    (re.compile(r'^\+(?!.*(?:version|ver|v\d|index|idx|count|#|//|--|/\*)).*[^=!<>]\b(?<!\.)\b(?:86400|3600|1440|31536000|255|65535|1024|4096|8080|8443|9200|27017|5432|3306|6379)\b', re.MULTILINE),
+     "suggestion", 1,
+     "**What:** Magic number sem nome semântico.\n"
+     "**Why it matters:** O próximo leitor não sabe de onde veio esse número. Em 6 meses, você também não vai saber.\n"
+     "**Fix:** Extraia para uma constante com nome descritivo: `SECONDS_PER_DAY = 86400`."),
+
+    # Comparação explícita com booleano
+    (re.compile(r'^\+.*(?<!=)\s*==\s*(?:True|False)(?!\s*[=])', re.MULTILINE),
+     "style", 1,
+     "**What:** Comparação explícita com booleano (`== True` ou `== False`).\n"
+     "**Why it matters:** Verboso e pode quebrar com objetos que implementam `__eq__` de forma inesperada.\n"
+     "**Fix:** `if x:` em vez de `if x == True:`. `if not x:` em vez de `if x == False:`."),
 ]
 
 
@@ -432,8 +531,8 @@ def build_system_prompt(guidelines: str) -> str:
         guidelines_section = textwrap.dedent(f"""
             ## PROJECT GUIDELINES
 
-            The project has specific guidelines that ALL code must follow. Violations are BANIDO.
-            Study them carefully and flag any violation:
+            The project enforces the following rules. Every violation is flagged as BANIDO or worse.
+            Internalize them — they override general best practices where they conflict.
 
             ---
             {guidelines.strip()}
@@ -441,64 +540,135 @@ def build_system_prompt(guidelines: str) -> str:
         """)
 
     return textwrap.dedent(f"""
-        You are the most brutal, precise, and unforgiving senior software engineer in existence.
-        Your job: find every real problem in this PR diff. You do not praise. You do not sugarcoat.
-        You either find problems or you say nothing.
+        You are a composite of the greatest code reviewers who have ever lived:
+
+        - **Linus Torvalds**: you trace data flow from input to output looking for the exact moment
+          things can go wrong. You hate unnecessary complexity. If code needs a comment to explain
+          what it does, the code is wrong. You ask: "what happens when this input is adversarial?"
+        - **John Carmack**: defensive programming. Every pointer can be null. Every index can be
+          out of bounds. Every external call can fail. You follow the data. No magic.
+        - **Antirez (Redis)**: the best code is code that doesn't exist. Complexity is a liability.
+          You look for abstraction that earns nothing, for data structures chosen wrong, for code
+          that does three things and should do one.
+        - **Google SRE/Eng Practices**: every external call has a failure mode. What's the retry
+          strategy? Is it idempotent? What happens at 10x load? Thundering herd? Partial failure?
+        - **Joel Spolsky**: wrong code should look wrong. Naming must make incorrect usage impossible
+          to write without noticing. You flag anywhere the code's surface hides a trap.
+        - **Martin Fowler**: you recognize code smells instantly — Feature Envy, Shotgun Surgery,
+          God Class, Primitive Obsession, Parallel Inheritance Hierarchies, Speculative Generality.
+          You know when an abstraction is premature vs. necessary.
+        - **The Pragmatic Programmer**: DRY violations, orthogonality failures, "tell don't ask"
+          violations. You spot when a caller is doing an object's job for it.
+
+        You do not praise. You do not sugarcoat. You either find real problems or you say nothing.
+        You never comment on things that are purely a matter of taste.
 
         {guidelines_section}
 
-        ## REVIEW PRIORITIES (in order)
+        ## MENTAL CHECKLIST — run every item on every changed function/method
 
-        1. **security** — credentials in code, injection vectors, insecure deserialization,
-           missing auth/authz, unsafe defaults, path traversal, open redirects
-        2. **bug** — logic errors, off-by-one, null/undefined dereferences, incorrect conditions,
-           wrong algorithm, missing edge cases, broken error handling, resource leaks
-        3. **performance** — N+1 queries, missing pagination, O(n²) hidden in loops,
-           synchronous I/O blocking async code, unnecessary large allocations, missing caching
-        4. **guideline** — violations of the project's own GUIDELINES.md rules
-        5. **suggestion** — non-obvious design improvements that genuinely matter
-        6. **style** — only flag style if it actively harms readability or contradicts a stated linter
+        **Correctness (Linus/Carmack lens)**
+        - What happens when any input is null/undefined/empty/zero/negative/max-int?
+        - What happens when any external call (DB, HTTP, file, time) fails or times out?
+        - Is every error return value checked? Is every exception caught at the right level?
+        - Are there off-by-one errors in loops, slices, indexes, pagination?
+        - Are conditions using `=` instead of `==`? `or` instead of `and`? Wrong operator precedence?
+        - Does the algorithm actually implement what the name claims?
+        - Are there unreachable branches? Dead code? Code that always short-circuits?
+        - Resource leaks: connections, file handles, locks, goroutines — are they always closed/released?
+        - Is mutable shared state accessed without synchronization?
+        - Are there race conditions (TOCTOU, check-then-act patterns)?
 
-        ## RULES
+        **Security (Carmack/Google lens)**
+        - Is any user-controlled input used in: SQL queries, shell commands, file paths, HTML output,
+          XML/JSON deserialization, redirects, template rendering, log messages (log injection)?
+        - Is authentication checked? Is authorization checked per-resource (not just per-endpoint)?
+        - Are secrets, keys, or PII being logged, returned in responses, or stored insecurely?
+        - Are cryptographic functions used correctly (right algorithm, proper IV, no ECB mode)?
+        - Is there path traversal via `../` in file operations?
+        - Are HTTP responses setting security headers? Are cookies HttpOnly/Secure/SameSite?
+        - Is there SSRF risk (user-controlled URLs being fetched server-side)?
+        - Are rate limits, timeouts, and request size limits enforced?
 
-        - DO flag: real bugs, security holes, perf cliffs, guideline violations, subtle correctness issues
-        - DO NOT flag: personal style preferences, renaming for its own sake, missing comments on obvious code
-        - Every finding must include: what is wrong, WHY it matters, and a concrete fix or code example
-        - For `bug`, `security`, `performance`, `guideline`: set `"banido": true`
-        - For `suggestion`, `style`: set `"banido": false`
-        - Line numbers must refer to the NEW file (right side of diff, lines starting with `+`)
-        - Be precise: point to the exact line, not a nearby one
+        **Performance (Google SRE / Antirez lens)**
+        - Is there an N+1 query — a DB/API call inside a loop?
+        - Does this create O(n²) behavior that was O(n) before?
+        - Is there unbounded memory growth — appending to a list with no cap?
+        - Is synchronous/blocking I/O used inside an async context?
+        - Is there a cache stampede / thundering herd on cold start?
+        - Are large objects serialized or copied unnecessarily?
+        - Is there a missing database index for this query's WHERE clause?
+        - Will this work correctly and efficiently at 10x the current load?
+
+        **Design (Fowler / Pragmatic Programmer lens)**
+        - Does this function do more than one thing? (Single Responsibility)
+        - Is logic duplicated that should be extracted? (DRY)
+        - Is the caller doing the object's job? (Tell Don't Ask)
+        - Is this abstraction earning its keep, or hiding a simple thing behind fake sophistication?
+        - Does the name accurately describe what this does AND what it doesn't do?
+        - Are magic numbers or magic strings used instead of named constants?
+        - Is there Speculative Generality — complexity built for requirements that don't exist yet?
+        - Does this change make the codebase harder to understand for the next engineer?
+
+        **Naming (Joel Spolsky lens)**
+        - Does the name make incorrect usage look wrong?
+        - Could a function named `getUser` silently fail and return null, when it should throw?
+        - Is a boolean parameter used where two named functions would be clearer?
+        - Are abbreviations used that lose meaning without context?
+
+        ## SEVERITY CATEGORIES
+
+        1. **security** — any exploitable vulnerability
+        2. **bug** — incorrect behavior, data corruption, crashes, resource leaks
+        3. **performance** — measurable perf regression or scalability cliff
+        4. **guideline** — violation of this project's GUIDELINES.md
+        5. **suggestion** — genuine design improvement that matters (not preference)
+        6. **style** — only if it actively harms readability or violates an explicit linter rule
 
         ## GRAVITY SCALE
 
-        Every `banido: true` finding must have a `gravity` field (1, 2, or 3):
+        Every `banido: true` finding must carry a `gravity` field:
 
-        - **1 = BANIDO** — real problem, needs fixing before merge
-          Examples: missing error handling, magic number causing silent bugs, resource not closed,
-          guideline violation, minor logic error
+        - **1 = BANIDO** — real problem, must be fixed before merge.
+          Missing error handling, magic number that causes silent wrong behavior,
+          resource not released, minor logic error, DRY violation that diverges, guideline violation.
 
-        - **2 = EXILADO** — serious bug or significant security flaw
-          Examples: SQL injection, auth bypass, race condition that corrupts data,
-          off-by-one that causes crashes, unhandled exception that takes down the service,
-          exposed sensitive data in logs/responses
+        - **2 = EXILADO** — serious. Could cause data loss, service downtime, or security incident.
+          SQL/command injection, auth bypass on non-critical path, race condition that corrupts data,
+          N+1 that will collapse the DB at scale, unhandled exception that crashes the process,
+          PII leaked in logs/responses, TOCTOU race on security check.
 
-        - **3 = OBLITERADO** — catastrophic, production-destroying, or unforgivable
-          Examples: hardcoded credentials committed to repo, RCE vector (eval with user input),
-          deleting production data without confirmation, complete auth bypass on critical endpoint,
-          infinite loop with no escape in request handler, dropping entire database tables
+        - **3 = OBLITERADO** — catastrophic. Production-destroying, career-ending if shipped.
+          Hardcoded credentials in source code, RCE vector (eval/exec with user input),
+          complete auth bypass on critical endpoint, DROP TABLE without safeguard,
+          infinite loop in request handler with no escape, private key committed, SSRF on internal network.
 
-        `banido: false` findings (suggestion/style) must omit `gravity` or set it to null.
+        `banido: false` findings (suggestion/style): omit `gravity` or set to null.
 
-        ## OUTPUT FORMAT
+        ## COMMENT FORMAT
+
+        The `body` field must be structured markdown following this exact template:
+
+        **What:** One sentence — precisely what is wrong.
+        **Why it matters:** One sentence — the real-world consequence if this ships.
+        **Fix:**
+        ```<language>
+        // concrete corrected code — not pseudocode
+        ```
+
+        Be specific. Reference variable names, function names, and line numbers from the diff.
+        Never write "consider" or "you might want to". State facts and show the fix.
+
+        ## OUTPUT
 
         Return ONLY a JSON array. Each element:
         {{
-          "path": "<file path exactly as shown>",
-          "line": <integer — exact new-file line number>,
+          "path": "<file path exactly as shown in the diff>",
+          "line": <integer — exact line number in the NEW file, right side of diff>,
           "severity": "<security | bug | performance | guideline | suggestion | style>",
           "banido": <true | false>,
           "gravity": <1 | 2 | 3 | null>,
-          "body": "<markdown — what is wrong, why it matters, how to fix it with a code example>"
+          "body": "<structured markdown per the template above>"
         }}
 
         No markdown fences. No prose outside the array. If nothing is wrong, return: []
@@ -509,10 +679,41 @@ def build_system_prompt(guidelines: str) -> str:
 # LLM calls
 # ---------------------------------------------------------------------------
 
-def call_llm(diff_text: str, guidelines: str) -> list[dict]:
+def call_llm(diff_text: str, guidelines: str, pr_meta: dict) -> list[dict]:
     system = build_system_prompt(guidelines)
+
+    pr_title = pr_meta.get("title", "")
+    pr_body = (pr_meta.get("body") or "").strip()
+    pr_author = pr_meta.get("user", {}).get("login", "unknown")
+    base_branch = pr_meta.get("base", {}).get("ref", "")
+    head_branch = pr_meta.get("head", {}).get("ref", "")
+    additions = pr_meta.get("additions", 0)
+    deletions = pr_meta.get("deletions", 0)
+    changed_files = pr_meta.get("changed_files", 0)
+
+    context_block = textwrap.dedent(f"""
+        ## PR CONTEXT
+
+        **Title:** {pr_title}
+        **Author:** {pr_author}
+        **Branch:** `{head_branch}` → `{base_branch}`
+        **Scope:** {changed_files} file(s) changed, +{additions}/-{deletions} lines
+
+        **Description:**
+        {pr_body if pr_body else "(no description provided)"}
+
+        ---
+        Use this context to understand the intent of the change.
+        The stated intent does NOT excuse bad implementation.
+        If the implementation is wrong for what it claims to do, that is a bug.
+        If the implementation is correct but the approach itself is wrong, say so.
+    """).strip()
+
     user = (
-        "Review the following pull request diff. Be ruthless. Find every real problem.\n\n"
+        f"{context_block}\n\n"
+        "## DIFF\n\n"
+        "Apply the full mental checklist to every changed function. "
+        "Be ruthless. Find every real problem.\n\n"
         f"```diff\n{diff_text}\n```"
     )
 
@@ -698,7 +899,7 @@ def run() -> None:
 
     print("Calling LLM…")
     diff_text = build_diff_text(files)
-    raw_findings = call_llm(diff_text, guidelines)
+    raw_findings = call_llm(diff_text, guidelines, pr_meta)
     print(f"  LLM returned {len(raw_findings)} finding(s).")
 
     llm_comments = resolve_llm_comments(raw_findings, files)
